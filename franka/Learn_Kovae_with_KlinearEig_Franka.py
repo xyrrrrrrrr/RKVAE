@@ -1,8 +1,8 @@
+from ntpath import join
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import gym
 import matplotlib.pyplot as plt
 import random
 from collections import OrderedDict
@@ -10,19 +10,54 @@ from copy import copy
 import argparse
 import os
 from torch.utils.tensorboard import SummaryWriter
-import sys
-sys.path.append("../utility/")
-sys.path.append("../")
 from scipy.integrate import odeint
-from Utility import data_collecter
-import time
-import tqdm
+# physics engine
+import pybullet as pb
+import pybullet_data
+from scipy.io import loadmat, savemat
+# Franka simulator
+from franka_env import FrankaEnv
+
+#data collect
+def Obs(o):
+    return np.concatenate((o[:3],o[7:]),axis=0)
+
+class data_collecter():
+    def __init__(self,env_name) -> None:
+        self.env_name = env_name
+        self.env =  FrankaEnv(render = False)
+        self.Nstates = 17
+        self.uval = 0.12
+        self.udim = 7
+        self.reset_joint_state = np.array(self.env.reset_joint_state)
+
+    def collect_koopman_data(self,traj_num,steps):
+        train_data = np.empty((steps+1,traj_num,self.Nstates+self.udim))
+        for traj_i in range(traj_num):
+            noise = (np.random.rand(7)-0.5)*2*0.2
+            joint_init = self.reset_joint_state+noise
+            joint_init = np.clip(joint_init,self.env.joint_low,self.env.joint_high)
+            s0 = self.env.reset_state(joint_init)
+            s0 = Obs(s0)
+            u10 = (np.random.rand(7)-0.5)*2*self.uval
+            data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
+            data_concat[self.udim:] += np.random.normal(0, 0.1, self.Nstates)
+            train_data[0,traj_i,:] = data_concat
+            for i in range(1,steps+1):
+                s0 = self.env.step(u10)
+                s0 = Obs(s0)
+                u10 = (np.random.rand(7)-0.5)*2*self.uval
+                data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
+                data_concat[self.udim:] += np.random.normal(0, 0.1, self.Nstates)
+                train_data[i,traj_i,:] = data_concat
+        return train_data
+        
 #define network
 def gaussian_init_(n_units, std=1):    
     sampler = torch.distributions.Normal(torch.Tensor([0]), torch.Tensor([std/n_units]))
     Omega = sampler.sample((n_units, n_units))[..., 0]  
     return Omega
-
+    
 class Network(nn.Module):
     def __init__(self, encode_layers, decoder_layers, Nkoopman, u_dim, x_dim, device=None):
         """
@@ -232,28 +267,28 @@ def Controlability_loss(net):
     
     return loss.clamp(min=0.0)  # 确保损失非负（奇异值过小时才产生惩罚）
 
-def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
-            encode_dim = 12,layer_depth=3,e_loss=1,gamma=0.5,Ktrain_samples=50000,\
-        lambda_recon=0.1,\
+def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
+            encode_dim = 20,layer_depth=3,e_loss=1,gamma=0.5, lambda_recon=0.4,\
         lambda_control=0.1,\
-        lambda_KL=0.1):
-    # Ktrain_samples = 1000
-    # Ktest_samples = 1000
-    Ktrain_samples = Ktrain_samples
+        lambda_KL=0.5):
+    np.random.seed(98)
+    # Ktrain_samples = 100
+    # Ktest_samples = 100
+    Ktrain_samples = 50000
     Ktest_samples = 20000
-    Ktrainsteps = 15
-    Kteststeps = 30
+    Ktrainsteps = 10
+    Kteststeps = 20
     Kbatch_size = 100
     res = 1
     normal = 1
+    gamma = 0.8
     #data prepare
     data_collect = data_collecter(env_name)
     u_dim = data_collect.udim
-    # Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
-    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train")
+    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps)
     Ktest_samples = Ktest_data.shape[1]
     print("test data ok!,shape:",Ktest_data.shape)
-    Ktrain_data = data_collect.collect_koopman_data(Ktrain_samples,Ktrainsteps,mode="train")
+    Ktrain_data = data_collect.collect_koopman_data(Ktrain_samples,Ktrainsteps)
     print("train data ok!,shape:",Ktrain_data.shape)
     Ktrain_samples = Ktrain_data.shape[1]
     in_dim = Ktest_data.shape[-1]-u_dim
@@ -281,12 +316,13 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     eval_step = 1000
     best_loss = 1000.0
     best_state_dict = {}
-    logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL)
-    if not os.path.exists( "../Data/"+suffix):
-        os.makedirs( "../Data/"+suffix)
+    subsuffix = suffix+"KK_KoVAE"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss)
+    logdir = "Data/"+suffix+"/"+subsuffix
+    if not os.path.exists( "Data/"+suffix):
+        os.makedirs( "Data/"+suffix)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
-    start_time = time.process_time()
+    import tqdm
     pbar = tqdm.trange(train_steps)
     for i in pbar:
         #K loss
@@ -296,17 +332,16 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         Reconloss, KLloss, Predloss = Klinear_loss(X,net,mse_loss,u_dim,gamma,Nstate,all_loss)
         control_loss = Eig_loss(net) + Controlability_loss(net)
         loss = Predloss + lambda_recon * Reconloss + lambda_control * control_loss + lambda_KL * KLloss
-        # loss = Kloss
-        pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}"})
         optimizer.zero_grad()
         loss.backward()
         optimizer.step() 
-
+        pbar.set_postfix({"Franka: Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}"})
+        optimizer.zero_grad()
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
             with torch.no_grad():
-                Reconloss, KLloss, Predloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=1)
+                Reconloss, KLloss, Predloss = Klinear_loss(X,net,mse_loss,u_dim,gamma,Nstate,all_loss)
                 control_loss = Eig_loss(net) + Controlability_loss(net)
                 Predloss = Predloss.detach().cpu().numpy()
                 Reconloss = Reconloss.detach().cpu().numpy()
@@ -318,35 +353,23 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss))
-            # print("-------------END-------------")
-        # if (time.process_time()-start_time)>=210*3600:
-        #     print("time out!:{}".format(time.clock()-start_time))
-        #     break
     print("END-best_loss{}".format(best_loss))
     
 
 def main():
     train(args.env,suffix=args.suffix,all_loss=args.all_loss,\
         encode_dim=args.encode_dim,layer_depth=args.layer_depth,\
-        e_loss=args.e_loss,gamma=args.gamma,\
-        Ktrain_samples=args.K_train_samples,\
-        lambda_recon=args.lambda_recon,\
-        lambda_control=args.lambda_control,\
-        lambda_KL=args.lambda_KL)
+            e_loss=args.eloss,gamma=args.gamma)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env",type=str,default="DampingPendulum")
-    parser.add_argument("--suffix",type=str,default="5_2")
+    parser.add_argument("--env",type=str,default="Franka")
+    parser.add_argument("--suffix",type=str,default="")
     parser.add_argument("--all_loss",type=int,default=1)
-    parser.add_argument("--K_train_samples",type=int,default=20000)
-    parser.add_argument("--e_loss",type=int,default=1)
-    parser.add_argument("--gamma",type=float,default=0.9)
+    parser.add_argument("--eloss",type=int,default=0)
+    parser.add_argument("--gamma",type=float,default=0.8)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--layer_depth",type=int,default=3)
-    parser.add_argument("--lambda_recon", type=float, default=0.4, help="重建约束权重")
-    parser.add_argument("--lambda_control", type=float, default=0.1, help="控制约束权重")
-    parser.add_argument("--lambda_KL", type=float, default=0.5, help="散度约束权重")
     args = parser.parse_args()
     main()
 

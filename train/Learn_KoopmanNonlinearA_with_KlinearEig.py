@@ -122,7 +122,8 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     data_collect = data_collecter(env_name)
     u_dim = data_collect.udim
     b_dim = u_dim
-    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
+    # Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
+    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train")
     Ktest_samples = Ktest_data.shape[1]
     print("test data ok!,shape:",Ktest_data.shape)
     Ktrain_data = data_collect.collect_koopman_data(Ktrain_samples,Ktrainsteps,mode="train")
@@ -159,7 +160,9 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         os.makedirs(logdir)
     writer = SummaryWriter(log_dir=logdir)
     start_time = time.process_time()
-    for i in tqdm.trange(train_steps):
+    import tqdm
+    pbar = tqdm.trange(train_steps)
+    for i in pbar:
         #K loss
         Kindex = list(range(Ktrain_samples))
         random.shuffle(Kindex)
@@ -174,6 +177,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         writer.add_scalar('Train/Eloss',Eloss,i)
         # writer.add_scalar('Train/Augloss',Augloss,i)
         writer.add_scalar('Train/loss',loss,i)
+        pbar.set_postfix({"Total Loss": f"{loss.item()}", "KLoss": f"{Kloss.item()}", "ELoss": f"{Eloss}"})
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
@@ -215,9 +219,9 @@ if __name__ == "__main__":
     parser.add_argument("--suffix",type=str,default="5_2")
     parser.add_argument("--all_loss",type=int,default=1)
     parser.add_argument("--e_loss",type=int,default=0)
-    parser.add_argument("--K_train_samples",type=int,default=50000)
+    parser.add_argument("--K_train_samples",type=int,default=20000)
     # parser.add_argument("--Aug_loss",type=int,default=0)
-    parser.add_argument("--gamma",type=float,default=0.8)
+    parser.add_argument("--gamma",type=float,default=0.9)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--b_dim",type=int,default=1)
     parser.add_argument("--detach",type=int,default=1)

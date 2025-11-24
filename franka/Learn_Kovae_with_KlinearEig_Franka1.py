@@ -443,7 +443,8 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
-                if Predloss<best_loss:
+                if Predloss<best_loss and control_loss == 0.0:
+                    print("Best model updated at iteration ", i)
                     best_loss = copy(Predloss)
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}

@@ -131,6 +131,7 @@ class Network(nn.Module):
         # 输出latent均值（mu_z）和对数方差（logvar_z，避免方差为负）
         self.fc_mu = nn.Linear(encode_layers[-1], encode_layers[-1])
         self.fc_logvar = nn.Linear(encode_layers[-1], encode_layers[-1])
+        self.gx = nn.Linear(encode_layers[-1],u_dim)
 
         # -------------------------- 2. Koopman latent先验（Prior Network）--------------------------
         # 功能：带控制量的线性先验 p(z_t | z_{t-1}, u_{t-1})，沿用原网络Koopman动力学
@@ -174,22 +175,28 @@ class Network(nn.Module):
         # 步骤2：输出近似后验的均值和对数方差
         mu_z = self.fc_mu(feat)
         logvar_z = self.fc_logvar(feat)
-        return mu_z, logvar_z
+        gx = self.gx(feat)
+        return mu_z, logvar_z, gx
+    
+    def control_encode(self,x,u):
+        feat = self.encode_feature(x)
+        gx = self.gx(feat)
+        return u*gx
     
     def encode(self, x):
         # 获取z
-        mu_z, logvar_z = self.encode_only(x)
+        mu_z, logvar_z, gx = self.encode_only(x)
         z = self.reparameterize(mu_z, logvar_z)
         mu_xz = torch.cat([x, mu_z], axis=-1)
         # 拼接
         # return z
-        return mu_xz, z, mu_z, logvar_z
+        return mu_xz, z, mu_z, logvar_z, gx
         
 
-    def prior(self, mu_xz, mu_z, u_prev, logvar_z, eps=1e-6):
+    def prior(self, mu_xz, mu_z, u, logvar_z, gx, eps=1e-6):
         """先验：基于前一时刻latent z_prev和控制量u_prev，计算当前z的先验 p(z|z_prev, u_prev)"""
         # Koopman线性动力学：z_t = A z_{t-1} + B u_{t-1}
-        mu_xz_next = self.lA(mu_xz) + self.lB(u_prev)
+        mu_xz_next = self.lA(mu_xz) + self.lB(u*gx)
         # 先验均值
         mu_prior = mu_xz_next[:, self.x_dim:]
         # 先验方差
@@ -200,8 +207,8 @@ class Network(nn.Module):
         logvar_prior = logvar_prior[:, self.x_dim:]
         return mu_xz_next, mu_prior, logvar_prior
     
-    def forward(self, mu_xz, mu_z, u_prev, logvar_z):
-        mu_xz_next, mu_prior, logvar_prior = self.prior(mu_xz, mu_z, u_prev, logvar_z)
+    def forward(self, mu_xz, mu_z, u_prev, logvar_z, gx):
+        mu_xz_next, mu_prior, logvar_prior = self.prior(mu_xz, mu_z, u_prev, logvar_z, gx)
         z_next = self.reparameterize(mu_prior, logvar_prior)
         return mu_xz_next, z_next, mu_prior, logvar_prior
 
@@ -250,7 +257,7 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = torch.DoubleTensor(data).to(device)
     x_dim = data.shape[2] - u_dim
-    mu_xz, z_current, mu_z, logvar_z = net.encode(data[0,:,u_dim:])
+    mu_xz, z_current, mu_z, logvar_z, gx = net.encode(data[0,:,u_dim:])
     # 提取状态数据用于流形约束
     states = data[:, :, u_dim:]
     controls = data[:, :, :u_dim]
@@ -268,7 +275,7 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
         # ux_samples = controls[idx_time, id_traj, :]
         # uy_samples = controls[idy_time, id_traj, :]
         # compute z
-        mu_xz_samples,_,_,_ = net.encode(statex_samples)
+        mu_xz_samples,_,_,_,_ = net.encode(statex_samples)
         # embedy_samples = net.encode(statey_samples)
         # get loss
         Geomloss = emb_loss(mu_xz_samples, statex_samples)
@@ -279,8 +286,8 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
     KLloss = torch.tensor(0.0, dtype=torch.float64, device=device)
     Predloss = torch.tensor(0.0, dtype=torch.float64, device=device)
     for i in range(steps-1):
-        mu_xz_next, z_next, mu_prior, logvar_prior = net.forward(mu_xz,mu_z,data[i,:,:u_dim],logvar_z)
-        mu_xz_next_real, z_next_real, _, _ = net.encode(data[i+1,:,u_dim:])
+        mu_xz_next, z_next, mu_prior, logvar_prior = net.forward(mu_xz,mu_z,data[i,:,:u_dim],logvar_z,gx)
+        mu_xz_next_real, z_next_real, _, _, _ = net.encode(data[i+1,:,u_dim:])
         x_recon = net.decode(z_current)
         beta_sum += beta
         # Reconstruction loss
@@ -292,7 +299,7 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
             Predloss += beta*mse_loss(mu_xz_next[:,:x_dim],data[i+1,:,u_dim:])
         else:
             Predloss += beta*mse_loss(mu_xz_next,mu_xz_next_real)
-        mu_xz_next_encoded,_,_,_ = net.encode(mu_xz_next[:,:x_dim])
+        mu_xz_next_encoded,_,_,_,gx = net.encode(mu_xz_next[:,:x_dim])
         Augloss += mse_loss(mu_xz_next_encoded,mu_xz_next)
         mu_xz = mu_xz_next
         mu_z = mu_prior
@@ -309,7 +316,7 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
 def Stable_loss(net,Nstate):
     x_ref = np.zeros(Nstate)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mu_xz, z, mu_z, logvar_z = net.encode(torch.DoubleTensor(x_ref).to(device))
+    mu_xz, z, mu_z, logvar_z, gx = net.encode(torch.DoubleTensor(x_ref).to(device))
     loss = torch.norm(z)
     return loss
 
@@ -401,7 +408,7 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
     eval_step = 1000
     best_loss = 1000.0
     best_state_dict = {}
-    subsuffix = suffix+"KK_KoVAE"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss)
+    subsuffix = suffix+"KK_KoVAE1"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss)
     logdir = "Data/"+suffix+"/"+subsuffix
     if not os.path.exists( "Data/"+suffix):
         os.makedirs( "Data/"+suffix)

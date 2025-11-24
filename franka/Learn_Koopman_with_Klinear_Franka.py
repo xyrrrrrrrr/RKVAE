@@ -40,12 +40,16 @@ class data_collecter():
             s0 = self.env.reset_state(joint_init)
             s0 = Obs(s0)
             u10 = (np.random.rand(7)-0.5)*2*self.uval
-            train_data[0,traj_i,:]=np.concatenate([u10.reshape(-1),s0.reshape(-1)],axis=0).reshape(-1)
+            data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
+            data_concat[self.udim:] += np.random.normal(0, 0.1, self.Nstates)
+            train_data[0,traj_i,:] = data_concat
             for i in range(1,steps+1):
                 s0 = self.env.step(u10)
                 s0 = Obs(s0)
                 u10 = (np.random.rand(7)-0.5)*2*self.uval
-                train_data[i,traj_i,:]=np.concatenate([u10.reshape(-1),s0.reshape(-1)],axis=0).reshape(-1)
+                data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
+                data_concat[self.udim:] += np.random.normal(0, 0.1, self.Nstates)
+                train_data[i,traj_i,:] = data_concat
         return train_data
         
 #define network
@@ -184,7 +188,7 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
-            Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss)
+            Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0)
             Eloss = Eig_loss(net)
             loss = Kloss+Eloss if e_loss else Kloss
             Kloss = Kloss.detach().cpu().numpy()

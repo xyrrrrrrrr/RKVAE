@@ -178,10 +178,10 @@ class Network(nn.Module):
         gx = self.gx(feat)
         return mu_z, logvar_z, gx
     
-    def control_encode(self,x,u):
+    def control_encode(self,x):
         feat = self.encode_feature(x)
         gx = self.gx(feat)
-        return u*gx
+        return gx
     
     def encode(self, x):
         # 获取z
@@ -300,7 +300,7 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
         else:
             Predloss += beta*mse_loss(mu_xz_next,mu_xz_next_real)
         mu_xz_next_encoded,_,_,_,gx = net.encode(mu_xz_next[:,:x_dim])
-        Augloss += mse_loss(mu_xz_next_encoded,mu_xz_next)
+        Augloss += beta*mse_loss(mu_xz_next_encoded,mu_xz_next)
         mu_xz = mu_xz_next
         mu_z = mu_prior
         logvar_z = mu_prior

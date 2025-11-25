@@ -407,6 +407,7 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
     #train
     eval_step = 1000
     best_loss = 1000.0
+    best_iteration = 0
     best_state_dict = {}
     subsuffix = suffix+"KK_KoVAE1"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss)
     logdir = "Data/"+suffix+"/"+subsuffix
@@ -446,11 +447,12 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
                 if Predloss<best_loss and control_loss == 0.0:
                     print("Best model updated at iteration ", i)
                     best_loss = copy(Predloss)
+                    best_iteration = i
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss))
-    print("END-best_loss{}".format(best_loss))
+    print("END-best_loss{}-best_iteration".format(best_loss, best_iteration))
     
 
 def main():

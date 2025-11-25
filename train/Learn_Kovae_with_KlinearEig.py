@@ -372,6 +372,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     #train
     eval_step = 1000
     best_loss = 1000.0
+    best_iteration = 0
     best_state_dict = {}
     logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom)
     if not os.path.exists( "../Data/"+suffix):
@@ -406,9 +407,10 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
-                if Predloss<best_loss and control_loss == 0.0:
+                if Predloss<best_loss:
                     print("Best model updated at iteration ", i)
                     best_loss = copy(Predloss)
+                    best_iteration = i
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
@@ -417,7 +419,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         # if (time.process_time()-start_time)>=210*3600:
         #     print("time out!:{}".format(time.clock()-start_time))
         #     break
-    print("END-best_loss{}".format(best_loss))
+    print("END-best_loss{}-best_iteration".format(best_loss, best_iteration))
     
 
 def main():

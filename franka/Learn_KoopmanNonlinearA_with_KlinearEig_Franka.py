@@ -201,7 +201,9 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
     if not os.path.exists(logdir):
         os.makedirs(logdir)
     writer = SummaryWriter(log_dir=logdir)
-    for i in range(train_steps):
+    import tqdm
+    pbar = tqdm.trange(train_steps)
+    for i in pbar:
         #K loss
         Kindex = list(range(Ktrain_samples))
         random.shuffle(Kindex)

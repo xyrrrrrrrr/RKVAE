@@ -357,7 +357,7 @@ def Controlability_loss(net):
     return loss.clamp(min=0.0)  # 确保损失非负（奇异值过小时才产生惩罚）
 
 
-def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
+def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
             encode_dim = 20,layer_depth=3,e_loss=1,gamma=0.8, lambda_recon=0.4,\
         lambda_control=0.1,\
         lambda_KL=0.5,\
@@ -392,6 +392,10 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
     print("encode layers:",encode_layers)
     print("decode layers:",decode_layers)
     net = Network(encode_layers,decode_layers,Nkoopman,u_dim,in_dim)
+    # rp = "./Data/KK_KoVAE1Frankalayer3_edim20_eloss0_gamma0.8_aloss1.pth"
+    # dicts = torch.load(rp,map_location=torch.device('cpu'))
+    # state_dict = dicts["model"]
+    # net.load_state_dict(state_dict)
     # print(net.named_modules())
     eval_step = 1000
     learning_rate = 1e-3
@@ -452,7 +456,7 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss))
-    print("END-best_loss{}-best_iteration".format(best_loss, best_iteration))
+    print("END-best_loss{}-best_iteration{}".format(best_loss, best_iteration))
     
 
 def main():

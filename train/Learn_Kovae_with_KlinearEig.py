@@ -419,7 +419,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         # if (time.process_time()-start_time)>=210*3600:
         #     print("time out!:{}".format(time.clock()-start_time))
         #     break
-    print("END-best_loss{}-best_iteration".format(best_loss, best_iteration))
+    print("END-best_loss{}-best_iteration{}".format(best_loss, best_iteration))
     
 
 def main():

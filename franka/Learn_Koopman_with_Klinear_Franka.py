@@ -117,7 +117,7 @@ def Eig_loss(net):
     loss = c[mask].sum()
     return loss
 
-def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
+def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
             encode_dim = 20,layer_depth=3,e_loss=1,gamma=0.8):
     np.random.seed(98)
     # Ktrain_samples = 100
@@ -171,7 +171,9 @@ def train(env_name,train_steps = 300000,suffix="",all_loss=0,\
     if not os.path.exists(logdir):
         os.makedirs(logdir)
     writer = SummaryWriter(log_dir=logdir)
-    for i in range(train_steps):
+    import tqdm
+    pbar = tqdm.trange(train_steps)
+    for i in pbar:
         #K loss
         Kindex = list(range(Ktrain_samples))
         random.shuffle(Kindex)

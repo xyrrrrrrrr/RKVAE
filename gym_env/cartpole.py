@@ -164,7 +164,8 @@ class CartPoleEnv(gym.Env):
         return np.array(self.state, dtype=np.float32), reward, done, {}
 
     def reset(self):
-        self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
+        # self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
+        self.state = [0.0,-1.0,0.0,0] + self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
         self.steps_beyond_done = None
         return np.array(self.state, dtype=np.float32)
 

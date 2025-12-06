@@ -9,7 +9,6 @@ from collections import OrderedDict
 from copy import copy
 import argparse
 import os
-from torch.utils.tensorboard import SummaryWriter
 import sys
 sys.path.append("../utility/")
 sys.path.append("../")
@@ -17,6 +16,7 @@ from scipy.integrate import odeint
 from Utility import data_collecter
 import time
 import tqdm
+
 #define network
 def gaussian_init_(n_units, std=1):    
     sampler = torch.distributions.Normal(torch.Tensor([0]), torch.Tensor([std/n_units]))
@@ -63,10 +63,10 @@ class ManifoldEmbLoss(nn.Module):
         x_dist_max = torch.clamp(x_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
         x_dist = x_dist / x_dist_max  # 归一化，避免尺度
         
-        z_dist_max = torch.max(z_dist, dim=1, keepdim=True)[0]
-        z_dist_max = torch.clamp(z_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
-        z_dist = z_dist / z_dist_max  # 归一化，避免尺度
-        # z_dist = z_dist/x_dist_max
+        # z_dist_max = torch.max(z_dist, dim=1, keepdim=True)[0]
+        # z_dist_max = torch.clamp(z_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
+        # z_dist = z_dist / z_dist_max  # 归一化，避免尺度
+        z_dist = z_dist/ x_dist_max
         
         # # 计算几何一致性损失
         loss = torch.mean(torch.abs(z_dist - x_dist))
@@ -106,11 +106,11 @@ class Network(nn.Module):
         # 初始化lA（沿用原网络正交化+幅值约束，确保初始稳定性）
         self.lA.weight.data = gaussian_init_(Nkoopman, std=1.0)
         U, _, V = torch.svd(self.lA.weight.data)
-        self.lA.weight.data = torch.mm(U, V.t()) * 0.9  # 幅值0.9，避免初始发散
+        self.lA.weight.data = torch.mm(U, V.t()) * 0.99  # 幅值0.99，避免初始发散
         # 初始化lB（高斯初始化）
         nn.init.normal_(self.lB.weight.data, mean=0.0, std=0.1)
         # 先验方差（固定小值，或可学习；此处固定为0.01，平衡稳定性与随机性）
-        # self.prior_logvar = nn.Parameter(torch.tensor([math.log(0.01)] * Nkoopman), requires_grad=False)
+        # self.prior_logvar = nn.Parameter(torch.log(torch.tensor([0.01] * (Nkoopman-x_dim))), requires_grad=False)
         # -------------------------- 3. 解码器（Generative Network）--------------------------
         # 功能：输入latent z+控制量u，重建观测x，即 p(x | z, u)
         self.decode_net = self._build_mlp(decoder_layers, activation=nn.ReLU())
@@ -171,6 +171,7 @@ class Network(nn.Module):
         Ad = self.lA.weight
         logvar_prior = torch.log(torch.sum(Ad ** 2 * torch.exp(logvar_xz).unsqueeze(1), dim=2))
         logvar_prior = logvar_prior[:, self.x_dim:]
+        # logvar_prior = self.prior_logvar
         return mu_xz_next, mu_prior, logvar_prior
     
     def forward(self, mu_xz, mu_z, u_prev, logvar_z, gx):
@@ -295,7 +296,7 @@ def Eig_loss(net):
     return loss
 
 # 能控性损失
-def Controlability_loss(net):
+def Controlability_loss(net, eval_=False):
     A = net.lA.weight
     B = net.lB.weight
     n = A.size(0)  # 获取状态维度n
@@ -317,7 +318,7 @@ def Controlability_loss(net):
     _, S, _ = torch.linalg.svd(C, full_matrices=False)  # S为奇异值向量
     min_singular = S[-1]  # 最小奇异值
     
-    varepsilon = 1e-6  # 避免数值不稳定的小常数
+    varepsilon = 1e-6 if eval_ else 1e-2
     loss = -min_singular + varepsilon  # 当最小奇异值 ≥ epsilon时，损失趋近于0
     
     return loss.clamp(min=0.0)  # 确保损失非负（奇异值过小时才产生惩罚）
@@ -333,8 +334,8 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     Ktrain_samples = Ktrain_samples
     Ktest_samples = 20000
     Ktrainsteps = 15
-    Kteststeps = 30
-    Kbatch_size = 100
+    Kteststeps = 15
+    Kbatch_size = 512
     res = 1
     normal = 1
     #data prepare
@@ -377,8 +378,6 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom)
     if not os.path.exists( "../Data/"+suffix):
         os.makedirs( "../Data/"+suffix)
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
     start_time = time.process_time()
     pbar = tqdm.trange(train_steps)
     for i in pbar:
@@ -387,10 +386,11 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         random.shuffle(Kindex)
         X = Ktrain_data[:,Kindex[:Kbatch_size],:]
         Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(X,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss,lambda_geom)
+        # control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
         control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
         loss = Predloss + lambda_recon * Reconloss + lambda_control * control_loss + lambda_KL * KLloss + lambda_geom * Geomloss
         # loss = Kloss
-        pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}", "Geom Loss": f"{Geomloss.item():.6f}"})
+        # pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}", "Geom Loss": f"{Geomloss.item():.6f}"})
         optimizer.zero_grad()
         loss.backward()
         optimizer.step() 
@@ -402,7 +402,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
             #K loss
             with torch.no_grad():
                 Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(Ktest_data,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss=0)
-                control_loss = Eig_loss(net) + Controlability_loss(net)
+                control_loss = Eig_loss(net) + Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim)
                 Predloss = Predloss.detach().cpu().numpy()
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
@@ -437,13 +437,13 @@ if __name__ == "__main__":
     parser.add_argument("--env",type=str,default="DampingPendulum")
     parser.add_argument("--suffix",type=str,default="5_2")
     parser.add_argument("--all_loss",type=int,default=1)
-    parser.add_argument("--K_train_samples",type=int,default=20000)
+    parser.add_argument("--K_train_samples",type=int,default=50000)
     parser.add_argument("--e_loss",type=int,default=1)
     parser.add_argument("--gamma",type=float,default=0.9)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--layer_depth",type=int,default=3)
     parser.add_argument("--lambda_geom", type=float, default=0.1, help="流形几何约束权重")
-    parser.add_argument("--lambda_recon", type=float, default=0.3, help="重建约束权重")
+    parser.add_argument("--lambda_recon", type=float, default=0.4, help="重建约束权重")
     parser.add_argument("--lambda_control", type=float, default=0.1, help="控制约束权重")
     parser.add_argument("--lambda_KL", type=float, default=0.5, help="散度约束权重")
     args = parser.parse_args()

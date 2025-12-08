@@ -48,6 +48,8 @@ class ManifoldEmbLoss(nn.Module):
         self.compute_knn(X)
         # 第二步：根据邻居索引，提取z和X的邻居样本
         n = z.shape[0]
+        x_dim = X.shape[1]
+        z_dim = z.shape[1]
         # 确保索引在合法范围内（双重保险）
         self.neighbor_indices = torch.clamp(self.neighbor_indices, 0, n-1)
         
@@ -63,13 +65,15 @@ class ManifoldEmbLoss(nn.Module):
         x_dist_max = torch.clamp(x_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
         x_dist = x_dist / x_dist_max  # 归一化，避免尺度
         
-        # z_dist_max = torch.max(z_dist, dim=1, keepdim=True)[0]
-        # z_dist_max = torch.clamp(z_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
-        # z_dist = z_dist / z_dist_max  # 归一化，避免尺度
-        z_dist = z_dist/ x_dist_max
-        
+        z_dist_max = torch.max(z_dist, dim=1, keepdim=True)[0]
+        z_dist_max = torch.clamp(z_dist_max, min=1e-8)  # 防止过小导致梯度爆炸
+        z_dist = z_dist / z_dist_max  # 归一化，避免尺度
+        # z_dist = z_dist * x_dim / (x_dist_max * z_dim)
+        dist_diff = torch.abs(z_dist - x_dist)
+        huber_loss = F.huber_loss(dist_diff, torch.zeros_like(dist_diff), delta=0.1, reduction='none')
         # # 计算几何一致性损失
-        loss = torch.mean(torch.abs(z_dist - x_dist))
+        # loss = torch.mean(torch.abs(z_dist - x_dist))
+        loss = torch.mean(huber_loss)
 
         return loss
 
@@ -89,16 +93,16 @@ class Network(nn.Module):
         self.Nkoopman = Nkoopman  # VAE latent维度
         self.u_dim = u_dim        # 控制量维度
         self.x_dim = x_dim        # 观测维度
-
+        self.activation = nn.ReLU()
         # -------------------------- 1. 变分编码器（Inference Network）--------------------------
         # 功能：输入观测x+控制量u，输出latent变量z的近似后验 q(z|x,u) 的均值/对数方差
         # （原网络编码逻辑扩展：先融合x+u特征，再输出均值/方差）
-        self.encode_feature = self._build_mlp(encode_layers, activation=nn.ReLU())  # 特征提取
+        self.encode_feature = self._build_mlp(encode_layers, activation=self.activation)  # 特征提取
         # 输出latent均值（mu_z）和对数方差（logvar_z，避免方差为负）
         self.fc_mu = nn.Linear(encode_layers[-1], encode_layers[-1])
         self.fc_logvar = nn.Linear(encode_layers[-1], encode_layers[-1])
         self.gx = nn.Linear(encode_layers[-1],u_dim)
-
+        
         # -------------------------- 2. Koopman latent先验（Prior Network）--------------------------
         # 功能：带控制量的线性先验 p(z_t | z_{t-1}, u_{t-1})，沿用原网络Koopman动力学
         self.lA = nn.Linear(Nkoopman, Nkoopman, bias=False)  # 状态转移矩阵 A
@@ -113,8 +117,7 @@ class Network(nn.Module):
         # self.prior_logvar = nn.Parameter(torch.log(torch.tensor([0.01] * (Nkoopman-x_dim))), requires_grad=False)
         # -------------------------- 3. 解码器（Generative Network）--------------------------
         # 功能：输入latent z+控制量u，重建观测x，即 p(x | z, u)
-        self.decode_net = self._build_mlp(decoder_layers, activation=nn.ReLU())
-
+        self.decode_net = self._build_mlp(decoder_layers, activation=self.activation)
         # 设备迁移
         self.to(self.device)
 
@@ -137,7 +140,7 @@ class Network(nn.Module):
     def encode_only(self, x):
         """编码器：输入x（观测），输出latent z的近似后验参数"""
         # 步骤1：提取高维特征
-        feat = self.encode_feature(x)
+        feat = self.activation(self.encode_feature(x))
         # 步骤2：输出近似后验的均值和对数方差
         mu_z = self.fc_mu(feat)
         logvar_z = self.fc_logvar(feat)
@@ -145,7 +148,7 @@ class Network(nn.Module):
         return mu_z, logvar_z, gx
     
     def control_encode(self,x):
-        feat = self.encode_feature(x)
+        feat = self.activation(self.encode_feature(x))
         gx = self.gx(feat)
         return gx
     
@@ -280,8 +283,10 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
     Predloss += 0.5*Augloss
     return Reconloss, KLloss, Predloss, Geomloss
 
-def Stable_loss(net,Nstate):
-    x_ref = np.zeros(Nstate)
+def Stable_loss(net,Nstate,env_name="Pendulum-v1"):
+    x_ref = np.zeros(Nstate) 
+    if env_name == "MountainCarContinuous-v0":
+        x_ref[0] = 0.45
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mu_xz, z, mu_z, logvar_z, gx = net.encode(torch.DoubleTensor(x_ref).to(device))
     loss = torch.norm(z)
@@ -328,9 +333,11 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         lambda_geom=0.1,\
         lambda_recon=0.1,\
         lambda_control=0.1,\
-        lambda_KL=0.1):
+        lambda_KL=0.1,\
+        device=0):
     # Ktrain_samples = 1000
     # Ktest_samples = 1000
+    torch.cuda.set_device(device)
     Ktrain_samples = Ktrain_samples
     Ktest_samples = 20000
     Ktrainsteps = 15
@@ -360,7 +367,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     net = Network(encode_layers,decode_layers,Nkoopman,u_dim,in_dim)
     # print(net.named_modules())
     eval_step = 1000
-    learning_rate = 1e-3
+    learning_rate = 5e-3
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -373,6 +380,8 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     #train
     eval_step = 1000
     best_loss = 1000.0
+    best_control_loss = 1000.0
+    convergence = 0
     best_iteration = 0
     best_state_dict = {}
     logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom)
@@ -387,7 +396,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         X = Ktrain_data[:,Kindex[:Kbatch_size],:]
         Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(X,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss,lambda_geom)
         # control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
-        control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
+        control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim, env_name=env_name)
         loss = Predloss + lambda_recon * Reconloss + lambda_control * control_loss + lambda_KL * KLloss + lambda_geom * Geomloss
         # loss = Kloss
         # pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}", "Geom Loss": f"{Geomloss.item():.6f}"})
@@ -398,23 +407,29 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.98
-            #K loss
+                param_group['lr'] *= 0.9
+            convergence += 1
             with torch.no_grad():
                 Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(Ktest_data,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss=0)
-                control_loss = Eig_loss(net) + Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim)
+                Eigloss = Eig_loss(net)
+                control_loss = Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim, env_name=env_name)
                 Predloss = Predloss.detach().cpu().numpy()
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
-                if Predloss<best_loss:
+                if Predloss<best_loss and control_loss<best_control_loss * 1.2 and Eigloss == 0:
                     print("Best model updated at iteration ", i)
+                    convergence = 0
                     best_loss = copy(Predloss)
+                    best_control_loss = copy(control_loss)
                     best_iteration = i
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
-                print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss))
+                print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} Eigloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss,Eigloss))
+            if convergence >= 20:
+                print("Early stopping at iteration ", i)
+                break
             # print("-------------END-------------")
         # if (time.process_time()-start_time)>=210*3600:
         #     print("time out!:{}".format(time.clock()-start_time))
@@ -430,7 +445,8 @@ def main():
         lambda_geom=args.lambda_geom,\
         lambda_recon=args.lambda_recon,\
         lambda_control=args.lambda_control,\
-        lambda_KL=args.lambda_KL)
+        lambda_KL=args.lambda_KL,
+        device=args.device)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -444,8 +460,9 @@ if __name__ == "__main__":
     parser.add_argument("--layer_depth",type=int,default=3)
     parser.add_argument("--lambda_geom", type=float, default=0.1, help="流形几何约束权重")
     parser.add_argument("--lambda_recon", type=float, default=0.4, help="重建约束权重")
-    parser.add_argument("--lambda_control", type=float, default=0.1, help="控制约束权重")
+    parser.add_argument("--lambda_control", type=float, default=0.2, help="控制约束权重")
     parser.add_argument("--lambda_KL", type=float, default=0.5, help="散度约束权重")
+    parser.add_argument("--device", type=int, default=0, help="CUDA device id")
     args = parser.parse_args()
     main()
 

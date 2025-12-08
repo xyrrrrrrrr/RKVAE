@@ -9,7 +9,6 @@ from collections import OrderedDict
 from copy import copy
 import argparse
 import os
-from torch.utils.tensorboard import SummaryWriter
 from scipy.integrate import odeint
 # physics engine
 import pybullet as pb
@@ -200,7 +199,6 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
         os.makedirs( "Data/"+suffix)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
-    writer = SummaryWriter(log_dir=logdir)
     import tqdm
     pbar = tqdm.trange(train_steps)
     for i in pbar:
@@ -214,10 +212,6 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
         optimizer.zero_grad()
         loss.backward()
         optimizer.step() 
-        writer.add_scalar('Train/Kloss',Kloss,i)
-        writer.add_scalar('Train/Eloss',Eloss,i)
-        # writer.add_scalar('Train/Augloss',Augloss,i)
-        writer.add_scalar('Train/loss',loss,i)
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
@@ -229,10 +223,6 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
                 Eloss = Eloss.detach().cpu().numpy()
                 # Augloss = Augloss.detach().cpu().numpy()
                 loss = loss.detach().cpu().numpy()
-                writer.add_scalar('Eval/Kloss',Kloss,i)
-                # writer.add_scalar('Eval/Augloss',Augloss,i)
-                writer.add_scalar('Eval/best_loss',best_loss,i)
-                writer.add_scalar('Eval/loss',loss,i)
                 if loss<best_loss:
                     best_loss = copy(Kloss)
                     best_state_dict = copy(net.state_dict())
@@ -240,7 +230,6 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:KoopmanNonlinearA_with_KlinearEigStep:{} Eval-loss{} K-loss:{}".format(i,loss,Kloss))
             # print("-------------END-------------")
-        writer.add_scalar('Eval/best_loss',best_loss,i)
         # if (time.process_time()-start_time)>=210*3600:
         #     print("time out!:{}".format(time.clock()-start_time))
         #     break

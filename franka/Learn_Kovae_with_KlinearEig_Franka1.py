@@ -364,7 +364,9 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
             encode_dim = 20,layer_depth=3,e_loss=1,gamma=0.8, lambda_recon=0.4,\
         lambda_control=0.1,\
         lambda_KL=0.5,\
-        lambda_geom=0.1):
+        lambda_geom=0.1,\
+        device = 0):
+    torch.cuda.set_device(device)
     np.random.seed(98)
     # Ktrain_samples = 100
     # Ktest_samples = 100
@@ -372,7 +374,7 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
     Ktest_samples = 20000
     Ktrainsteps = 10
     Kteststeps = 10
-    Kbatch_size = 100
+    Kbatch_size = 512
     res = 1
     normal = 1
     gamma = 0.8
@@ -401,7 +403,7 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
     # net.load_state_dict(state_dict)
     # print(net.named_modules())
     eval_step = 1000
-    learning_rate = 1e-3
+    learning_rate = 1e-2
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -414,7 +416,9 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
     #train
     eval_step = 1000
     best_loss = 1000.0
+    best_control_loss = 1000.0
     best_iteration = 0
+    convergence = 0
     best_state_dict = {}
     subsuffix = suffix+"KK_KoVAE1"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss)
     logdir = "Data/"+suffix+"/"+subsuffix
@@ -443,29 +447,31 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
         if (i+1) % eval_step ==0:
             #K loss
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.98
+                param_group['lr'] *= 0.95
+            convergence += 1
             with torch.no_grad():
                 Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(Ktest_data,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss=0)
-                control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net, in_dim)
+                Eigloss = Eig_loss(net)
+                control_loss = Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim)
                 Predloss = Predloss.detach().cpu().numpy()
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
-                if Predloss<best_loss:
+                if Predloss<best_loss and control_loss<best_control_loss * 1.2 and Eigloss == 0:
                     print("Best model updated at iteration ", i)
                     best_loss = copy(Predloss)
                     best_iteration = i
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
                     torch.save(Saved_dict,logdir+".pth")
-                print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss))
+                print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} Eigloss:{}".format(i,Predloss,Reconloss,KLloss,control_loss, Eigloss))
     print("END-best_loss{}-best_iteration{}".format(best_loss, best_iteration))
     
 
 def main():
     train(args.env,suffix=args.suffix,all_loss=args.all_loss,\
         encode_dim=args.encode_dim,layer_depth=args.layer_depth,\
-            e_loss=args.eloss,gamma=args.gamma)
+            e_loss=args.eloss,gamma=args.gamma, device=args.device)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -476,6 +482,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma",type=float,default=0.9)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--layer_depth",type=int,default=3)
+    parser.add_argument("--device", type=int, default=0)
     args = parser.parse_args()
     main()
 

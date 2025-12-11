@@ -9,7 +9,6 @@ from collections import OrderedDict
 from copy import copy
 import argparse
 import os
-from torch.utils.tensorboard import SummaryWriter
 import sys
 sys.path.append("../utility/")
 sys.path.append("../")
@@ -105,14 +104,13 @@ def Eig_loss(net):
     return loss
 
 def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
-            encode_dim = 12,layer_depth=3,e_loss=1,gamma=0.5,Ktrain_samples=50000):
-    # Ktrain_samples = 1000
-    # Ktest_samples = 1000
+            encode_dim = 12,layer_depth=3,e_loss=1,gamma=0.5,Ktrain_samples=50000,device=0):
+    torch.cuda.set_device(device)
     Ktrain_samples = Ktrain_samples
     Ktest_samples = 20000
     Ktrainsteps = 15
     Kteststeps = 30
-    Kbatch_size = 100
+    Kbatch_size = 512
     res = 1
     normal = 1
     #data prepare
@@ -134,7 +132,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     net = Network(layers,Nkoopman,u_dim)
     # print(net.named_modules())
     eval_step = 1000
-    learning_rate = 1e-3
+    learning_rate = 1e-2
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -146,13 +144,11 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     #train
     eval_step = 1000
     best_loss = 1000.0
+    convergence = 0
     best_state_dict = {}
     logdir = "../Data/"+suffix+"/KoopmanU_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples)
     if not os.path.exists( "../Data/"+suffix):
         os.makedirs( "../Data/"+suffix)
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
-    writer = SummaryWriter(log_dir=logdir)
     start_time = time.process_time()
     for i in range(train_steps):
         #K loss
@@ -166,12 +162,12 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         optimizer.zero_grad()
         loss.backward()
         optimizer.step() 
-        writer.add_scalar('Train/Kloss',Kloss,i)
-        writer.add_scalar('Train/Eloss',Eloss,i)
-        writer.add_scalar('Train/loss',loss,i)
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.9
+            convergence += 1
             with torch.no_grad():
                 Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0)
                 Eloss = Eig_loss(net)
@@ -179,21 +175,17 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                 Kloss = Kloss.detach().cpu().numpy()
                 Eloss = Eloss.detach().cpu().numpy()
                 loss = loss.detach().cpu().numpy()
-                writer.add_scalar('Eval/Kloss',Kloss,i)
-                writer.add_scalar('Eval/Eloss',Eloss,i)
-                writer.add_scalar('Eval/best_loss',best_loss,i)
-                writer.add_scalar('Eval/loss',loss,i)
                 if loss<best_loss:
+                    convergence = 0
                     best_loss = copy(Kloss)
                     best_state_dict = copy(net.state_dict())
                     Saved_dict = {'model':best_state_dict,'layer':layers}
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:Koopman_with_KlinearEig Step:{} Eval-loss{} K-loss:{} ".format(i,loss,Kloss))
             # print("-------------END-------------")
-        writer.add_scalar('Eval/best_loss',best_loss,i)
-        # if (time.process_time()-start_time)>=210*3600:
-        #     print("time out!:{}".format(time.clock()-start_time))
-        #     break
+            if convergence >= 20:
+                print("Early stopping at iteration ", i)
+                break
     print("END-best_loss{}".format(best_loss))
     
 
@@ -201,7 +193,7 @@ def main():
     train(args.env,suffix=args.suffix,all_loss=args.all_loss,\
         encode_dim=args.encode_dim,layer_depth=args.layer_depth,\
             e_loss=args.e_loss,gamma=args.gamma,\
-                Ktrain_samples=args.K_train_samples)
+                Ktrain_samples=args.K_train_samples,device=args.device)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -210,9 +202,10 @@ if __name__ == "__main__":
     parser.add_argument("--all_loss",type=int,default=1)
     parser.add_argument("--K_train_samples",type=int,default=50000)
     parser.add_argument("--e_loss",type=int,default=0)
-    parser.add_argument("--gamma",type=float,default=0.8)
+    parser.add_argument("--gamma",type=float,default=0.9)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--layer_depth",type=int,default=3)
+    parser.add_argument("--device",type=int,default=0)
     args = parser.parse_args()
     main()
 

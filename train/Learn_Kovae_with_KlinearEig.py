@@ -283,10 +283,8 @@ def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss
     Predloss += 0.5*Augloss
     return Reconloss, KLloss, Predloss, Geomloss
 
-def Stable_loss(net,Nstate,env_name="Pendulum-v1"):
+def Stable_loss(net,Nstate):
     x_ref = np.zeros(Nstate) 
-    if env_name == "MountainCarContinuous-v0":
-        x_ref[0] = 0.45
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mu_xz, z, mu_z, logvar_z, gx = net.encode(torch.DoubleTensor(x_ref).to(device))
     loss = torch.norm(z)
@@ -341,7 +339,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     Ktrain_samples = Ktrain_samples
     Ktest_samples = 20000
     Ktrainsteps = 15
-    Kteststeps = 15
+    Kteststeps = 30
     Kbatch_size = 512
     res = 1
     normal = 1
@@ -367,7 +365,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     net = Network(encode_layers,decode_layers,Nkoopman,u_dim,in_dim)
     # print(net.named_modules())
     eval_step = 1000
-    learning_rate = 5e-3
+    learning_rate = 1e-2
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -375,6 +373,8 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     emb_loss = ManifoldEmbLoss()
     optimizer = torch.optim.Adam(net.parameters(),
                                     lr=learning_rate)
+    # optimizer = torch.optim.SGD(net.parameters(),
+    #                                 lr=learning_rate,momentum=0.9)
     for name, param in net.named_parameters():
         print("model:",name,param.requires_grad)
     #train
@@ -385,6 +385,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     best_iteration = 0
     best_state_dict = {}
     logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom)
+    currentdir = "../Data/"+suffix+"/KoVAE_"+env_name + "_current"
     if not os.path.exists( "../Data/"+suffix):
         os.makedirs( "../Data/"+suffix)
     start_time = time.process_time()
@@ -396,7 +397,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         X = Ktrain_data[:,Kindex[:Kbatch_size],:]
         Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(X,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss,lambda_geom)
         # control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
-        control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim, env_name=env_name)
+        control_loss = Eig_loss(net) + Controlability_loss(net) + Stable_loss(net,in_dim)
         loss = Predloss + lambda_recon * Reconloss + lambda_control * control_loss + lambda_KL * KLloss + lambda_geom * Geomloss
         # loss = Kloss
         # pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss:.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}", "Geom Loss": f"{Geomloss.item():.6f}"})
@@ -412,11 +413,13 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
             with torch.no_grad():
                 Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(Ktest_data,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss=0)
                 Eigloss = Eig_loss(net)
-                control_loss = Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim, env_name=env_name)
+                control_loss = Controlability_loss(net, eval_=True) + Stable_loss(net,in_dim)
                 Predloss = Predloss.detach().cpu().numpy()
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
+                Saved_dict = {'model':net.state_dict(),'encode_layer':encode_layers,'decode_layer':decode_layers}
+                torch.save(Saved_dict,currentdir+".pth")
                 if Predloss<best_loss and control_loss<best_control_loss * 1.2 and Eigloss == 0:
                     print("Best model updated at iteration ", i)
                     convergence = 0

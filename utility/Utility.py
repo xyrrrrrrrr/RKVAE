@@ -150,9 +150,11 @@ class DoublePendulum():
         self.observation_space = spaces.Box(low,-low,dtype=np.float32)
 
     def reset(self):
-        th0 = random.uniform(-0.1*np.pi, 0.1*np.pi)
+        # th0 = random.uniform(-0.1*np.pi, 0.1*np.pi)
+        th0 = random.uniform(-0.2*np.pi, 0.2*np.pi)
         dth0 = random.uniform(-1, 1)
-        th1 = random.uniform(-0.1*np.pi, 0.1*np.pi)
+        # th1 = random.uniform(-0.1*np.pi, 0.1*np.pi)
+        th1 = random.uniform(-0.2*np.pi, 0.2*np.pi)
         dth1 = random.uniform(-1, 1)
         self.s0 = np.array([th0,th1,dth0, dth1])
         return self.s0

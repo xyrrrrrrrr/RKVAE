@@ -122,7 +122,7 @@ class Continuous_MountainCarEnv(gym.Env):
         return self.state, reward, done, {}
 
     def reset(self):
-        self.state = np.array([self.np_random.uniform(low=-0.6, high=-0.4), 0])
+        self.state = np.array([self.np_random.uniform(low=-0.6, high=-0.4), self.np_random.uniform(low=-0.1, high=0.1)])
         return np.array(self.state, dtype=np.float32)
 
     def reset_state(self,state):

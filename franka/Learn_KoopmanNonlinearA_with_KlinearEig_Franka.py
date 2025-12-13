@@ -214,6 +214,8 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
         optimizer.step() 
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.98
             #K loss
             with torch.no_grad():
                 Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0,detach=1)

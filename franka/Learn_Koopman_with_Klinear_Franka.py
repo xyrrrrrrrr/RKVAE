@@ -185,6 +185,8 @@ def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             #K loss
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.98
             Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0)
             Eloss = Eig_loss(net)
             loss = Kloss+Eloss if e_loss else Kloss

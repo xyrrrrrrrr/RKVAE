@@ -166,7 +166,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         if (i+1) % eval_step ==0:
             #K loss
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.9
+                param_group['lr'] *= 0.95
             convergence += 1
             with torch.no_grad():
                 Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0)
@@ -183,7 +183,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:Koopman_with_KlinearEig Step:{} Eval-loss{} K-loss:{} ".format(i,loss,Kloss))
             # print("-------------END-------------")
-            if convergence >= 20:
+            if convergence >= 50:
                 print("Early stopping at iteration ", i)
                 break
     print("END-best_loss{}".format(best_loss))

@@ -175,7 +175,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.9
+                param_group['lr'] *= 0.95
             convergence += 1
             #K loss
             with torch.no_grad():
@@ -193,7 +193,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                     Saved_dict = {'model':best_state_dict,'layer':layers,'blayer':blayers}
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:KoopmanNonlinearA_with_KlinearEigStep:{} Eval-loss{} K-loss:{}".format(i,loss,Kloss))
-            if convergence >= 20:
+            if convergence >= 50:
                 print("Early stopping at iteration ", i)
                 break
     print("END-best_loss{}".format(best_loss))

@@ -360,7 +360,7 @@ def Controlability_loss(net, eval_=False):
     return loss.clamp(min=0.0)  # 确保损失非负（奇异值过小时才产生惩罚）
 
 
-def train(env_name,train_steps = 500000,suffix="",all_loss=0,\
+def train(env_name,train_steps = 800000,suffix="",all_loss=0,\
             encode_dim = 20,layer_depth=3,e_loss=1,gamma=0.8, lambda_recon=0.4,\
         lambda_control=0.1,\
         lambda_KL=0.5,\

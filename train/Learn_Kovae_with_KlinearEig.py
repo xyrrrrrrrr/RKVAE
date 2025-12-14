@@ -347,7 +347,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     data_collect = data_collecter(env_name)
     u_dim = data_collect.udim
     # Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
-    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train")
+    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train") if env_name != "CartPole-v1" and env_name !="MountainCarContinuous-v0" else data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
     Ktest_samples = Ktest_data.shape[1]
     print("test data ok!,shape:",Ktest_data.shape)
     Ktrain_data = data_collect.collect_koopman_data(Ktrain_samples,Ktrainsteps,mode="train")

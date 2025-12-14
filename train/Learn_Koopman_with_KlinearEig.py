@@ -116,7 +116,8 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     #data prepare
     data_collect = data_collecter(env_name)
     u_dim = data_collect.udim
-    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
+    # Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train") if env_name != "CartPole-v1" and env_name !="MountainCarContinuous-v0" else data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
+    Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="train")
     Ktest_samples = Ktest_data.shape[1]
     print("test data ok!,shape:",Ktest_data.shape)
     Ktrain_data = data_collect.collect_koopman_data(Ktrain_samples,Ktrainsteps,mode="train")
@@ -166,7 +167,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         if (i+1) % eval_step ==0:
             #K loss
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.95
+                param_group['lr'] *= 0.9
             convergence += 1
             with torch.no_grad():
                 Kloss = Klinear_loss(Ktest_data,net,mse_loss,u_dim,gamma,Nstate,all_loss=0)
@@ -183,7 +184,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                     torch.save(Saved_dict,logdir+".pth")
                 print("Method:Koopman_with_KlinearEig Step:{} Eval-loss{} K-loss:{} ".format(i,loss,Kloss))
             # print("-------------END-------------")
-            if convergence >= 50:
+            if convergence >= 20:
                 print("Early stopping at iteration ", i)
                 break
     print("END-best_loss{}".format(best_loss))

@@ -199,6 +199,8 @@ class Network(nn.Module):
             dim=-1  # 对latent维度求和
         ).mean()  # 对batch维度求平均
 
+        # penalty = 0.1 - torch.norm(logvar_z, dim=1).mean()
+        # return kl_loss + torch.clamp(penalty, min=0.0)
         return kl_loss
 
 def K_loss(data,net,u_dim=1,Nstate=4):
@@ -408,7 +410,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
         if (i+1) % eval_step ==0:
             for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.9
+                param_group['lr'] *= 0.95
             convergence += 1
             with torch.no_grad():
                 Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(Ktest_data,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss=0)

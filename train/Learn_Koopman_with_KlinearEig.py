@@ -133,7 +133,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     net = Network(layers,Nkoopman,u_dim)
     # print(net.named_modules())
     eval_step = 1000
-    learning_rate = 1e-2
+    learning_rate = 1e-3
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -177,6 +177,7 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                 Eloss = Eloss.detach().cpu().numpy()
                 loss = loss.detach().cpu().numpy()
                 if loss<best_loss:
+                    print("Best model updated at iteration ", i)
                     convergence = 0
                     best_loss = copy(Kloss)
                     best_state_dict = copy(net.state_dict())

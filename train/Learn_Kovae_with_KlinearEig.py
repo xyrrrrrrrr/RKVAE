@@ -207,14 +207,15 @@ def K_loss(data,net,u_dim=1,Nstate=4):
     steps,train_traj_num,Nstates = data.shape
     device = net.device
     data = torch.DoubleTensor(data).to(device)
-    mu_xz, z_current, mu_z, logvar_z = net.encode(data[0,:,u_dim:])
+    mu_xz, z_current, mu_z, logvar_z, gx = net.encode(data[0,:,u_dim:])
     max_loss_list = []
     mean_loss_list = []
+    x_dim = data.shape[2] - u_dim
     for i in range(steps-1):
-        mu_xz_next, z_next, mu_prior, logvar_prior = net.forward(mu_xz,mu_z,data[i,:,:u_dim],logvar_z)
-        x_recon = net.decode(z_next)
+        mu_xz_next, z_next, mu_prior, logvar_prior = net.forward(mu_xz,mu_z,data[i,:,:u_dim],logvar_z,gx)
+        x_pred = mu_xz_next[:,:x_dim]
         y = data[i+1,:,u_dim:]
-        Err = x_recon-y
+        Err = x_pred-y
         mu_xz = mu_xz_next
         mu_z = mu_prior
         logvar_z = logvar_prior

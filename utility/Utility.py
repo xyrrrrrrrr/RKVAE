@@ -418,9 +418,10 @@ class data_collecter():
                 for i in range(1,steps+1):
                     s0,r,done,_ = self.env.step(u10)
                     u10 = np.random.uniform(self.umin, self.umax)
-                    data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
                     if mode == "train":
-                        data_concat[self.udim:] += np.random.normal(0, 0.1, self.Nstates)
+                        s0 += np.random.normal(0, 0.1, s0.shape)
+                        self.env.reset_state(s0)
+                    data_concat = np.concatenate([u10.reshape(-1), s0.reshape(-1)], axis=0).reshape(-1)
                     train_data[i,traj_i,:] = data_concat
         return train_data
 

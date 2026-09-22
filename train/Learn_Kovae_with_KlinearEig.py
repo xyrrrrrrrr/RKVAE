@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import gym
 import matplotlib.pyplot as plt
 import random
 from collections import OrderedDict
@@ -13,7 +12,6 @@ import sys
 sys.path.append("../utility/")
 sys.path.append("../")
 from scipy.integrate import odeint
-from Utility import data_collecter
 import time
 import tqdm
 
@@ -66,7 +64,7 @@ class ManifoldEmbLoss(nn.Module):
         return loss
 
 class Network(nn.Module):
-    def __init__(self, encode_layers, decoder_layers, Nkoopman, u_dim, x_dim, device=None):
+    def __init__(self, encode_layers, decoder_layers, Nkoopman, u_dim, x_dim, device=None, use_logvar=False, activation_name="relu"):
         """
         Args:
             encode_layers: 编码器特征提取层维度（如[64, 32]，输入→中间特征）
@@ -77,11 +75,14 @@ class Network(nn.Module):
             device: 计算设备
         """
         super(Network, self).__init__()
-        self.device = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(device, int):
+            device = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.Nkoopman = Nkoopman 
         self.u_dim = u_dim 
         self.x_dim = x_dim 
-        self.activation = nn.ReLU()
+        self.activation_name = activation_name
+        self.activation = nn.Tanh() if activation_name == "tanh" else nn.ReLU()
 
         self.encode_feature = self._build_mlp(encode_layers, activation=self.activation)  
 
@@ -89,18 +90,26 @@ class Network(nn.Module):
         self.fc_logvar = nn.Linear(encode_layers[-1], encode_layers[-1])
         self.fc_logvar.weight.data.fill_(0.0)
         self.fc_logvar.bias.data.fill_(0.0)
-        self.fc_logvar.weight.requires_grad = False
-        self.fc_logvar.bias.requires_grad = False
         self.gx = nn.Linear(encode_layers[-1],u_dim)
         
 
-        self.lA = nn.Linear(Nkoopman, Nkoopman, bias=False) 
+        self.lA = nn.Linear(Nkoopman, Nkoopman, bias=False)
+        self.lB0 = nn.Linear(u_dim, Nkoopman, bias=False)
+        self.lBbilinear = nn.Linear(u_dim * Nkoopman, Nkoopman, bias=False)
         self.lB = nn.Linear(u_dim, Nkoopman, bias=False)     
         self.lA.weight.data = gaussian_init_(Nkoopman, std=1.0)
         U, _, V = torch.svd(self.lA.weight.data)
-        self.lA.weight.data = torch.mm(U, V.t()) * 0.99 
+        self.lA.weight.data = torch.mm(U, V.t()) * 0.99
         nn.init.normal_(self.lB.weight.data, mean=0.0, std=0.1)
-        self.prior_logvar = nn.Parameter(torch.log(torch.tensor([0.01] * (Nkoopman-x_dim))), requires_grad=False)
+        # Start the bilinear branch from the well-scaled linear input model:
+        # B0 initially matches B, while the state-dependent correction is zero.
+        # This avoids an ill-conditioned G(z)=B0+Btilde(z) at the first updates.
+        with torch.no_grad():
+            self.lB0.weight.copy_(self.lB.weight)
+            self.lBbilinear.weight.zero_()
+        self.use_logvar = use_logvar
+        if not use_logvar:
+            self.prior_logvar = nn.Parameter(torch.log(torch.tensor([0.01] * (Nkoopman-x_dim))), requires_grad=False)
 
         self.decode_net = self._build_mlp(decoder_layers, activation=self.activation)
         self.to(self.device)
@@ -114,23 +123,25 @@ class Network(nn.Module):
         return nn.Sequential(mlp)
 
     def reparameterize(self, mu, logvar=None):
+        if logvar is None:
+            return mu
         std = torch.exp(0.5 * logvar)  
-        eps = torch.randn_like(std, device=self.device) 
+        eps = torch.randn_like(std) 
         return mu + eps * std
 
     def encode_only(self, x):
         feat = self.activation(self.encode_feature(x))
         mu_z = self.fc_mu(feat)
-        logvar_z = self.fc_logvar(feat)
-        gx = self.gx(feat)
+        logvar_z = self.fc_logvar(feat).clamp(-20, 10)
+        gx = 0.1 + 0.9 * torch.sigmoid(self.gx(feat))
 
         return mu_z, logvar_z, gx
     
     def control_encode(self,x):
         feat = self.activation(self.encode_feature(x))
-        gx = self.gx(feat)
+        gx = 0.1 + 0.9 * torch.sigmoid(self.gx(feat))
         return gx
-    
+
     def encode(self, x):
         mu_z, logvar_z, gx = self.encode_only(x)
         z = self.reparameterize(mu_z, logvar_z)
@@ -138,24 +149,27 @@ class Network(nn.Module):
 
         return mu_xz, z, mu_z, logvar_z, gx
         
+    def predict(self, lifted, u, mode="lifted"):
+        if mode == "bilinear":
+            coupling = (u.unsqueeze(-1) * lifted.unsqueeze(-2)).flatten(-2)
+            return self.lA(lifted) + self.lB0(u) + self.lBbilinear(coupling)
+        if mode != "lifted":
+            raise ValueError("mode must be lifted or bilinear")
+        return self.lA(lifted) + self.lB(u * self.control_encode(lifted[..., :self.x_dim]))
 
-    def prior(self, mu_xz, mu_z, u, logvar_z, gx, eps=1e-6):
-        mu_xz_next = self.lA(mu_xz) + self.lB(u*gx)
-        mu_prior = mu_xz_next[:, self.x_dim:]
-        logvar_xz = torch.zeros_like(mu_xz_next)
-        logvar_xz[:, self.x_dim:] = logvar_z
-        Ad = self.lA.weight
-        # logvar_prior = torch.log(torch.sum(Ad ** 2 * torch.exp(logvar_xz).unsqueeze(1), dim=2))
-        # logvar_prior = logvar_prior[:, self.x_dim:]
-        logvar_prior = self.prior_logvar
+    def prior(self, mu_xz, mu_z, u, logvar_z, gx=None, eps=1e-12, mode="lifted"):
+        prediction = self.predict(mu_xz, u, mode)
+        transition = self.lA.weight
+        if mode == "bilinear":
+            blocks = self.lBbilinear.weight.reshape(self.Nkoopman, self.u_dim, self.Nkoopman)
+            transition = transition + torch.einsum("...m,imj->...ij", u, blocks)
+        variance = torch.cat([torch.zeros_like(mu_xz[..., :self.x_dim]), logvar_z.exp()], -1)
+        propagated = (transition.square() * variance.unsqueeze(-2)).sum(-1)
+        return prediction, prediction[..., self.x_dim:], propagated[..., self.x_dim:].clamp_min(eps).log()
 
-        return mu_xz_next, mu_prior, logvar_prior
-    
-    def forward(self, mu_xz, mu_z, u_prev, logvar_z, gx):
-        mu_xz_next, mu_prior, logvar_prior = self.prior(mu_xz, mu_z, u_prev, logvar_z, gx)
-        z_next = self.reparameterize(mu_prior, logvar_prior)
-        return mu_xz_next, z_next, mu_prior, logvar_prior
-
+    def forward(self, mu_xz, mu_z, u_prev, logvar_z, gx=None, mode="lifted"):
+        prediction, mean, logvar = self.prior(mu_xz, mu_z, u_prev, logvar_z, gx, mode=mode)
+        return prediction, self.reparameterize(mean, logvar), mean, logvar
 
     def decode(self, z):
         x_recon = self.decode_net(z)
@@ -172,69 +186,44 @@ class Network(nn.Module):
 
         return kl_loss
 
-def Klinear_loss(data,net,mse_loss,emb_loss,u_dim=1,gamma=0.99,Nstate=4,all_loss=0,lambda_geom=0):
-    steps,train_traj_num,NKoopman = data.shape
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data = torch.DoubleTensor(data).to(device)
-    x_dim = data.shape[2] - u_dim
-    mu_xz, z_current, mu_z, logvar_z, gx = net.encode(data[0,:,u_dim:])
-    states = data[:, :, u_dim:]
-    controls = data[:, :, :u_dim]
-    batch_size = states.shape[1]
-    Geomloss = torch.tensor(0.0, dtype=torch.float64, device=device)
-    if lambda_geom > 0:
-        id_traj = torch.randint(0, train_traj_num, (min(100, batch_size//2),), device=device)
-        idx_time = torch.randint(0, steps - 1,  (1,), device=device)
-        statex_samples = states[idx_time, id_traj, :]
-        # compute z
-        mu_xz_samples,_,_,_,_ = net.encode(statex_samples)
-        # get loss
-        Geomloss = emb_loss(mu_xz_samples, statex_samples)
-    beta = 1.0
-    beta_sum = 0.0
-    Augloss = torch.tensor(0.0, dtype=torch.float64, device=device)
-    Reconloss = torch.tensor(0.0, dtype=torch.float64, device=device)
-    KLloss = torch.tensor(0.0, dtype=torch.float64, device=device)
-    Predloss = torch.tensor(0.0, dtype=torch.float64, device=device)
-    for i in range(steps-1):
-        mu_xz_next, z_next, mu_prior, logvar_prior = net.forward(mu_xz,mu_z,data[i,:,:u_dim],logvar_z,gx)
-        mu_xz_next_real, z_next_real, _, _, _ = net.encode(data[i+1,:,u_dim:])
-        x_recon = net.decode(z_current)
-        beta_sum += beta
-        # Reconstruction loss
-        Reconloss += beta*(mse_loss(x_recon,data[i,:,u_dim:]))
-        # KL divergence loss
-        KLloss += beta*net.compute_KL_loss(mu_z, logvar_z, mu_prior, logvar_prior)
-        # Prediction loss
-        if not all_loss:
-            Predloss += beta*mse_loss(mu_xz_next[:,:x_dim],data[i+1,:,u_dim:])
-        else:
-            Predloss += beta*mse_loss(mu_xz_next,mu_xz_next_real)
-        mu_xz_next_encoded,_,_,_,gx = net.encode(mu_xz_next[:,:x_dim])
-        Augloss += beta*mse_loss(mu_xz_next_encoded,mu_xz_next)
-        mu_xz = mu_xz_next
-        mu_z = mu_prior
-        logvar_z = mu_prior
-        z_current = z_next_real
-        beta *= gamma
-    Augloss = Augloss/beta_sum
-    Reconloss = Reconloss/beta_sum
-    KLloss = KLloss/beta_sum
-    Predloss = Predloss/beta_sum
-    Predloss += 0.5*Augloss
-    return Reconloss, KLloss, Predloss, Geomloss
+def joint_losses(data, net, noise_std=0.0):
+    """Sec. VI: time-summed reconstruction/Koopman MSE, time-averaged KL."""
+    parameter = next(net.parameters())
+    data = torch.as_tensor(data, dtype=parameter.dtype, device=parameter.device)
+    if data.ndim != 3 or data.shape[0] < 2:
+        raise ValueError("Expected [time>=2, batch, u_dim+x_dim]")
+    states = data[..., net.u_dim:]
+    states = states + noise_std * torch.randn_like(states)
+    controls = data[..., :net.u_dim] / 8.0
+    mu_xz, sample, mean, logvar, _ = net.encode(states)
+    lifted = mu_xz
+    rec = (net.decode(sample) - states).square().mean(dim=(-1, -2)).sum()
+    kl = 0.5 * (mean.square() + logvar.exp() - 1 - logvar).sum(-1).mean()
+    losses = {"rec": rec, "kl": kl}
+    z_hat_bilinear_next = net.predict(lifted[:-1], data[:-1, :, :net.u_dim], "bilinear")
+    z_hat_lifted_next = net.predict(lifted[:-1], data[:-1, :, :net.u_dim], "lifted")
+    losses["bilinear"] = (z_hat_bilinear_next - lifted[1:]).square().mean(dim=(-1, -2)).sum()
+    losses["lifted"] = (z_hat_lifted_next - lifted[1:]).square().mean(dim=(-1, -2)).sum()
+    return losses
+
+
+def Klinear_loss(data, net, mse_loss=None, emb_loss=None, u_dim=1, gamma=1,
+                 Nstate=4, all_loss=1, lambda_geom=0):
+    losses = joint_losses(data, net)
+    return losses["rec"], losses["kl"], losses["bilinear"] + losses["lifted"], losses["rec"].new_zeros(())
 
 def Stable_loss(net,Nstate):
     x_ref = np.zeros(Nstate) 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mu_xz, z, mu_z, logvar_z, gx = net.encode(torch.DoubleTensor(x_ref).to(device))
-    loss = torch.norm(z)
+    device = next(net.parameters()).device
+    mu_z, _, _ = net.encode_only(torch.as_tensor(x_ref, dtype=torch.float64, device=device))
+    mu_xz = torch.cat([torch.zeros_like(torch.as_tensor(x_ref, dtype=torch.float64, device=device)), mu_z])
+    # Penalize the deterministic lifted equilibrium, consistent with the paper.
+    loss = torch.norm(mu_xz)
     return loss
 
 def Eig_loss(net):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     A = net.lA.weight
-    c = torch.linalg.eigvals(A).abs()-1.0*torch.ones(1,dtype=torch.float64).to(device)#预留抑制噪声的量，不希望噪声保持传播
+    c = torch.linalg.eigvals(A).abs()-1.0#预留抑制噪声的量，不希望噪声保持传播
     mask = c>0
     loss = c[mask].sum()
     return loss
@@ -263,24 +252,31 @@ def Controlability_loss(net, eval_=False):
     
     return loss.clamp(min=0.0) 
 
-def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
+def train(env_name,epochs = 100,suffix="",all_loss=0,\
             encode_dim = 12,layer_depth=3,e_loss=1,gamma=0.5,Ktrain_samples=50000,\
-        lambda_geom=0.1,\
-        lambda_recon=0.1,\
-        lambda_control=0.1,\
-        lambda_KL=0.1,\
-        device=0):
+        lambda_geom=0.0,\
+        lambda_recon=1.0,\
+        lambda_control=0.0,\
+        lambda_KL=1.0,\
+        device=0,
+        use_logvar=True, noise_std=0.002, Ktest_samples=20000, eval_every_epochs=10,
+        early_stopping_patience=20):
+    # print(use_logvar)
     # Ktrain_samples = 1000
     # Ktest_samples = 1000
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
     Ktrain_samples = Ktrain_samples
-    Ktest_samples = 20000
+    Ktest_samples = Ktest_samples
     Ktrainsteps = 15
     Kteststeps = 30
     Kbatch_size = 512
     res = 1
     normal = 1
     #data prepare
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utility"))
+    from Utility import data_collecter
     data_collect = data_collecter(env_name)
     u_dim = data_collect.udim
     # Ktest_data = data_collect.collect_koopman_data(Ktest_samples,Kteststeps,mode="eval")
@@ -293,16 +289,15 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     in_dim = Ktest_data.shape[-1]-u_dim
     Nstate = in_dim
     # layer_depth = 4
-    layer_width = 128
-    encode_layers = [in_dim]+[layer_width]*layer_depth+[encode_dim]
+    layer_width = 64
+    encode_layers = [in_dim]+[layer_width]*(layer_depth-1)+[encode_dim]
     Nkoopman = encode_dim + in_dim
-    decode_layers = [encode_dim] + [layer_width]*layer_depth + [in_dim]
+    decode_layers = [encode_dim] + [layer_width]*(layer_depth-1) + [in_dim]
     print("encode layers:",encode_layers)
     print("decode layers:",decode_layers)
-    net = Network(encode_layers,decode_layers,Nkoopman,u_dim,in_dim)
+    net = Network(encode_layers,decode_layers,Nkoopman,u_dim,in_dim,device,use_logvar)
     # print(net.named_modules())
-    eval_step = 1000
-    learning_rate = 1e-2
+    learning_rate = 1e-3
     if torch.cuda.is_available():
         net.cuda() 
     net.double()
@@ -315,33 +310,39 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
     for name, param in net.named_parameters():
         print("model:",name,param.requires_grad)
     #train
-    eval_step = 1000
     best_loss = 1000.0
     best_control_loss = 1000.0
     convergence = 0
     best_iteration = 0
     best_state_dict = {}
-    logdir = "../Data/"+suffix+"/KoV_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom)
+    logdir = "../Data/"+suffix+"/KoVAE_"+env_name+"layer{}_edim{}_eloss{}_gamma{}_aloss{}_samples{}_recon{}_control{}_KL{}_geom{}_logvar{}".format(layer_depth,encode_dim,e_loss,gamma,all_loss,Ktrain_samples,lambda_recon,lambda_control,lambda_KL,lambda_geom,use_logvar)
     currentdir = "../Data/"+suffix+"/KoVAE_"+env_name + "_current"
     if not os.path.exists( "../Data/"+suffix):
         os.makedirs( "../Data/"+suffix)
     start_time = time.process_time()
-    pbar = tqdm.trange(train_steps)
-    for i in pbar:
-        #K loss
+    pbar = tqdm.trange(epochs, desc="epoch")
+    batches_per_epoch = max(1, (Ktrain_samples + Kbatch_size - 1) // Kbatch_size)
+    for epoch in pbar:
+        # One epoch is a complete pass through every training trajectory.
         Kindex = list(range(Ktrain_samples))
         random.shuffle(Kindex)
-        X = Ktrain_data[:,Kindex[:Kbatch_size],:]
-        Reconloss, KLloss, Predloss, Geomloss = Klinear_loss(X,net,mse_loss,emb_loss,u_dim,gamma,Nstate,all_loss,lambda_geom)
-        control_loss = Eig_loss(net) + Controlability_loss(net)
-        loss = Predloss + lambda_recon * Reconloss + lambda_control * (control_loss + Stable_loss(net,in_dim)) + lambda_KL * KLloss + lambda_geom * Geomloss
-        pbar.set_postfix({"Total Loss": f"{loss.item():.6f}", "Pred Loss": f"{Predloss.item():.6f}", "Reconstruct Loss": f"{Reconloss.item():.6f}", "Control loss": f"{control_loss.item():.6f}", "KL Loss": f"{KLloss.item():.6f}", "Geom Loss": f"{Geomloss.item():.6f}"})
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step() 
+        epoch_loss = 0.0
+        for batch_start in range(0, Ktrain_samples, Kbatch_size):
+            X = Ktrain_data[:,Kindex[batch_start:batch_start + Kbatch_size],:]
+            parts = joint_losses(X, net, noise_std=noise_std)
+            Reconloss, KLloss = parts["rec"], parts["kl"]
+            Predloss = parts["bilinear"] + parts["lifted"]
+            Geomloss = Predloss.new_zeros(())
+            control_loss = Eig_loss(net) + Controlability_loss(net)
+            loss = Predloss + lambda_recon * Reconloss + lambda_control * (control_loss + Stable_loss(net,in_dim)) + lambda_KL * KLloss + lambda_geom * Geomloss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        pbar.set_postfix({"loss": f"{epoch_loss / batches_per_epoch:.6f}", "batches": batches_per_epoch})
 
         # print("Step:{} Loss:{}".format(i,loss.detach().cpu().numpy()))
-        if (i+1) % eval_step ==0:
+        if (epoch + 1) % eval_every_epochs == 0 or epoch == epochs - 1:
             for param_group in optimizer.param_groups:
                 param_group['lr'] *= 0.95
             convergence += 1
@@ -353,20 +354,20 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
                 Reconloss = Reconloss.detach().cpu().numpy()
                 KLloss = KLloss.detach().cpu().numpy()
                 control_loss = control_loss.detach().cpu().numpy()
-                Saved_dict = {'model':net.state_dict(),'encode_layer':encode_layers,'decode_layer':decode_layers}
+                Saved_dict = {'model':net.state_dict(),'encode_layer':encode_layers,'decode_layer':decode_layers, 'schema_version': 2, 'u_dim': u_dim, 'noise_std': noise_std}
                 torch.save(Saved_dict,currentdir+".pth")
-                if Predloss<best_loss and control_loss<best_control_loss * 1.2 and Eigloss == 0:
-                    print("Best model updated at iteration ", i)
+                if Predloss<best_loss:
+                    print("Best model updated at epoch ", epoch + 1)
                     convergence = 0
                     best_loss = copy(Predloss)
                     best_control_loss = copy(control_loss)
-                    best_iteration = i
+                    best_iteration = epoch + 1
                     best_state_dict = copy(net.state_dict())
-                    Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers}
+                    Saved_dict = {'model':best_state_dict,'encode_layer':encode_layers,'decode_layer':decode_layers, 'schema_version': 2, 'u_dim': u_dim, 'noise_std': noise_std}
                     torch.save(Saved_dict,logdir+".pth")
-                print("Method:KoVAE_with_KlinearEig Step:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} Eigloss:{} ".format(i,Predloss,Reconloss,KLloss,control_loss,Eigloss))
-            if convergence >= 20:
-                print("Early stopping at iteration ", i)
+                print("Method:KoVAE_with_KlinearEig Epoch:{} Predloss{} Reconloss:{} KLloss{} Controlloss:{} Eigloss:{} ".format(epoch + 1,Predloss,Reconloss,KLloss,control_loss,Eigloss))
+            if convergence >= early_stopping_patience:
+                print("Early stopping at epoch ", epoch + 1)
                 break
 
     print("END-best_loss{}-best_iteration{}".format(best_loss, best_iteration))
@@ -374,14 +375,19 @@ def train(env_name,train_steps = 200000,suffix="",all_loss=0,\
 
 def main():
     train(args.env,suffix=args.suffix,all_loss=args.all_loss,\
+        epochs=args.epochs,\
+        eval_every_epochs=args.eval_every_epochs,\
+        early_stopping_patience=args.early_stopping_patience,\
         encode_dim=args.encode_dim,layer_depth=args.layer_depth,\
         e_loss=args.e_loss,gamma=args.gamma,\
         Ktrain_samples=args.K_train_samples,\
+        Ktest_samples=args.K_test_samples,\
         lambda_geom=args.lambda_geom,\
         lambda_recon=args.lambda_recon,\
         lambda_control=args.lambda_control,\
         lambda_KL=args.lambda_KL,
-        device=args.device)
+        device=args.device,
+        use_logvar=args.use_logvar, noise_std=args.noise_std)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -389,15 +395,20 @@ if __name__ == "__main__":
     parser.add_argument("--suffix",type=str,default="5_2")
     parser.add_argument("--all_loss",type=int,default=1)
     parser.add_argument("--K_train_samples",type=int,default=50000)
+    parser.add_argument("--K_test_samples",type=int,default=20000)
     parser.add_argument("--e_loss",type=int,default=1)
     parser.add_argument("--gamma",type=float,default=0.9)
     parser.add_argument("--encode_dim",type=int,default=20)
     parser.add_argument("--layer_depth",type=int,default=3)
-    parser.add_argument("--lambda_geom", type=float, default=0.1, help="流形几何约束权重")
-    parser.add_argument("--lambda_recon", type=float, default=0.4, help="重建约束权重")
-    parser.add_argument("--lambda_control", type=float, default=0.2, help="控制约束权重")
-    parser.add_argument("--lambda_KL", type=float, default=0.5, help="散度约束权重")
+    parser.add_argument("--lambda_geom", type=float, default=0.0, help="流形几何约束权重")
+    parser.add_argument("--lambda_recon", type=float, default=1.0, help="重建约束权重")
+    parser.add_argument("--lambda_control", type=float, default=0.0, help="控制约束权重")
+    parser.add_argument("--lambda_KL", type=float, default=1.0, help="散度约束权重")
     parser.add_argument("--device", type=int, default=0, help="CUDA device id")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--eval_every_epochs", type=int, default=10)
+    parser.add_argument("--early_stopping_patience", type=int, default=20)
+    parser.add_argument("--noise_std", type=float, default=0.002)
+    parser.add_argument("--use_logvar", action='store_true')
     args = parser.parse_args()
     main()
-

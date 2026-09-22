@@ -3,7 +3,6 @@
 使用安装了 torch、scipy、gym、matplotlib、pybullet 的 DL 环境，在仓库根目录运行。代码只注入状态转移后的单个过程噪声 v；每 epoch 完整遍历数据，验证和早停使用 epoch 语义；不使用控制约束损失。
 
 ```bash
-/home/xyrrrrrrrr/.conda/envs/DL/bin/python experiments/check_rkvae.py
 /home/xyrrrrrrrr/.conda/envs/DL/bin/python experiments/rkvae.py train --system damping --epochs 100 --seed 1 --device cuda:0 --output results/paper/damping/seed1/train
 /home/xyrrrrrrrr/.conda/envs/DL/bin/python experiments/rkvae.py evaluate --checkpoint results/paper/damping/seed1/train/best.pt --mode lifted --eta 0.1 --sigma 0.1 --trials 100 --horizon 200 --output results/paper/damping/seed1/lifted_sigma01
 ```

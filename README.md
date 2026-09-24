@@ -27,6 +27,7 @@ PYTHON=/home/xyrrrrrrrr/.conda/envs/DL/bin/python
 $PYTHON experiments/rkvae.py --help
 $PYTHON experiments/evaluate_dkuc_franka.py --help
 $PYTHON experiments/plot_franka_sigma005.py
+$PYTHON experiments/run_eta_ablation.py --checkpoint results/e2_pendulum_norm_sampled_z_sigma002_theta2_eta001_200ep_gpu/train/best_lifted.pt --output-root results/e2_pendulum_ablation_sigma005/eta_ablation_lifted
 ```
 
 The Franka trajectory figure is written to the Franka result tree under
